@@ -249,13 +249,11 @@ func (r *Registry) handleBlobUploadGet(rw httpx.ResponseWriter, req *http.Reques
 		rw.WriteError(http.StatusInternalServerError, err)
 		return
 	}
-	wr, err := cs.Writer(ctx, content.WithRef("spegel-upload:"+dist.Session))
-	if err != nil {
+	status, err := cs.Status(ctx, "spegel-upload:"+dist.Session)
+	if err != nil && errdefs.IsNotFound(err) {
 		http.Error(rw, err.Error(), http.StatusNotFound)
 		return
-	}
-	status, err := wr.Status()
-	if err != nil {
+	} else if err != nil {
 		http.Error(rw, err.Error(), http.StatusInternalServerError)
 		return
 	}
