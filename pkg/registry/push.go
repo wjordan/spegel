@@ -197,7 +197,7 @@ func (r *Registry) handleBlobUploadChunk(rw httpx.ResponseWriter, req *http.Requ
 	}
 
 	rw.Header().Set("Location", "/v2/"+dist.Name+"/blobs/uploads/"+dist.Session)
-	rw.Header().Set("Range", "0-"+strconv.FormatInt(status.Offset-1, 10))
+	rw.Header().Set("Range", "0-"+strconv.FormatInt(max(0, status.Offset-1), 10))
 	rw.Header().Set("Docker-Upload-UUID", dist.Session)
 	rw.Header().Set(httpx.HeaderContentLength, "0")
 	rw.WriteHeader(http.StatusAccepted)
@@ -260,7 +260,7 @@ func (r *Registry) handleBlobUploadGet(rw httpx.ResponseWriter, req *http.Reques
 		return
 	}
 
-	rw.Header().Set("Range", "0-"+strconv.FormatInt(status.Offset-1, 10))
+	rw.Header().Set("Range", "0-"+strconv.FormatInt(max(0, status.Offset-1), 10))
 	rw.Header().Set("Location", "/v2/"+dist.Name+"/blobs/uploads/"+dist.Session)
 	rw.Header().Set("Docker-Upload-UUID", dist.Session)
 	rw.Header().Set(httpx.HeaderContentLength, "0")
