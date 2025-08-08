@@ -60,6 +60,7 @@ type RegistryCmd struct {
 	MirrorResolveRetries         int           `arg:"--mirror-resolve-retries,env:MIRROR_RESOLVE_RETRIES" default:"3" help:"Max amount of mirrors to attempt."`
 	ResolveLatestTag             bool          `arg:"--resolve-latest-tag,env:RESOLVE_LATEST_TAG" default:"true" help:"When true latest tags will be resolved to digests."`
 	DebugWebEnabled              bool          `arg:"--debug-web-enabled,env:DEBUG_WEB_ENABLED" default:"false" help:"When true enables debug web page."`
+	EnablePushEndpoints          bool          `arg:"--enable-push,env:ENABLE_PUSH" default:"false" help:"Enable OCI distribution push (write) endpoints. Disabled by default."`
 }
 
 type CleanupCmd struct {
@@ -186,6 +187,9 @@ func registryCommand(ctx context.Context, args *RegistryCmd) (err error) {
 		registry.WithResolveTimeout(args.MirrorResolveTimeout),
 		registry.WithLogger(log),
 		registry.WithBasicAuth(username, password),
+	}
+	if args.EnablePushEndpoints {
+		registryOpts = append(registryOpts, registry.WithPushEnabled(true))
 	}
 	reg, err := registry.NewRegistry(ociStore, router, registryOpts...)
 	if err != nil {
