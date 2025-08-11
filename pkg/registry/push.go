@@ -251,10 +251,10 @@ func (r *Registry) handleBlobUploadGet(rw httpx.ResponseWriter, req *http.Reques
 	}
 	status, err := cs.Status(ctx, "spegel-upload:"+dist.Session)
 	if err != nil && errdefs.IsNotFound(err) {
-		http.Error(rw, err.Error(), http.StatusNotFound)
+		rw.WriteError(http.StatusNotFound, oci.NewDistributionError(oci.ErrCodeBlobUploadUnknown, "unknown upload session", nil))
 		return
 	} else if err != nil {
-		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		rw.WriteError(http.StatusInternalServerError, err)
 		return
 	}
 
@@ -300,7 +300,7 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 			rw.WriteError(http.StatusInternalServerError, err)
 			return
 		}
-		if err := w.Commit(ctx, size, dgst); err != nil {
+		if err := w.Commit(ctx, size, dgst); err != nil && !errdefs.IsAlreadyExists(err) {
 			rw.WriteError(http.StatusInternalServerError, err)
 			return
 		}
