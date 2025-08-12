@@ -14,6 +14,7 @@ import (
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/leases"
+	"github.com/containerd/containerd/v2/pkg/labels"
 	"github.com/containerd/errdefs"
 	"github.com/google/uuid"
 	"github.com/opencontainers/go-digest"
@@ -147,7 +148,8 @@ func (r *Registry) handleBlobUploadMonolithic(rw httpx.ResponseWriter, req *http
 		rw.WriteError(http.StatusBadRequest, oci.NewDistributionError(oci.ErrCodeDigestInvalid, "payload digest mismatch", nil))
 		return
 	}
-	if err := w.Commit(ctx, n, expected); err != nil {
+	label := map[string]string{labels.LabelDistributionSource + "." + dist.Registry: dist.Name}
+	if err := w.Commit(ctx, n, expected, content.WithLabels(label)); err != nil {
 		rw.WriteError(http.StatusInternalServerError, err)
 		return
 	}
@@ -232,7 +234,8 @@ func (r *Registry) handleBlobUploadCommit(rw httpx.ResponseWriter, req *http.Req
 		return
 	}
 
-	if err = w.Commit(ctx, status.Offset, dist.Digest); err != nil && !errdefs.IsAlreadyExists(err) {
+	label := map[string]string{labels.LabelDistributionSource + "." + dist.Registry: dist.Name}
+	if err = w.Commit(ctx, status.Offset, dist.Digest, content.WithLabels(label)); err != nil && !errdefs.IsAlreadyExists(err) {
 		rw.WriteError(http.StatusInternalServerError, err)
 		return
 	}
@@ -300,7 +303,8 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 			rw.WriteError(http.StatusInternalServerError, err)
 			return
 		}
-		if err := w.Commit(ctx, size, dgst); err != nil && !errdefs.IsAlreadyExists(err) {
+		label := map[string]string{labels.LabelDistributionSource + "." + dist.Registry: dist.Name}
+		if err := w.Commit(ctx, size, dgst, content.WithLabels(label)); err != nil && !errdefs.IsAlreadyExists(err) {
 			rw.WriteError(http.StatusInternalServerError, err)
 			return
 		}
