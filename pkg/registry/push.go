@@ -45,6 +45,28 @@ func (r *Registry) withLease(ctx context.Context) (context.Context, error) {
 	return leases.WithLease(ctx, l.ID), nil
 }
 
+func uploadRef(id string) string {
+	return ("spegel-upload:") + id
+}
+
+func withSource(dist oci.DistributionPath) content.Opt {
+	return content.WithLabels(map[string]string{labels.LabelDistributionSource + "." + dist.Registry: dist.Name})
+}
+
+func uploadStatus(rw httpx.ResponseWriter, dist oci.DistributionPath, offset int64) {
+	rw.Header().Set("Location", "/v2/"+dist.Name+"/blobs/uploads/"+dist.Session)
+	rw.Header().Set("Docker-Upload-UUID", dist.Session)
+	rw.Header().Set("Range", "0-"+strconv.FormatInt(max(0, offset-1), 10))
+	rw.Header().Set(httpx.HeaderContentLength, "0")
+}
+
+func created(rw httpx.ResponseWriter, dist oci.DistributionPath) {
+	rw.Header().Set(oci.HeaderDockerDigest, dist.Digest.String())
+	rw.Header().Set("Location", dist.URL().Path)
+	rw.Header().Set(httpx.HeaderContentLength, "0")
+	rw.WriteHeader(http.StatusCreated)
+}
+
 func (r *Registry) pushHandler(rw httpx.ResponseWriter, req *http.Request) {
 	rw.SetHandler("push")
 
@@ -121,8 +143,7 @@ func (r *Registry) getContainerdClient() (*client.Client, content.Store, error) 
 }
 
 func (r *Registry) handleBlobUploadMonolithic(rw httpx.ResponseWriter, req *http.Request, dist oci.DistributionPath, cs content.Store) {
-	expected := dist.Digest
-	if err := expected.Validate(); err != nil {
+	if err := dist.Digest.Validate(); err != nil {
 		rw.WriteError(http.StatusBadRequest, oci.NewDistributionError(oci.ErrCodeDigestInvalid, "invalid digest", err.Error()))
 		return
 	}
@@ -132,48 +153,35 @@ func (r *Registry) handleBlobUploadMonolithic(rw httpx.ResponseWriter, req *http
 		return
 	}
 
-	w, err := cs.Writer(ctx, content.WithRef("spegel-upload:"+uuid.NewString()))
+	w, err := cs.Writer(ctx, content.WithRef(uploadRef(uuid.NewString())))
 	if err != nil {
 		rw.WriteError(http.StatusInternalServerError, err)
 		return
 	}
 	defer w.Close()
 
-	hasher := expected.Algorithm().Digester()
-	n, err := io.Copy(io.MultiWriter(w, hasher.Hash()), req.Body)
+	n, err := io.Copy(w, req.Body)
 	if err != nil {
 		rw.WriteError(http.StatusInternalServerError, err)
 		return
 	}
-	computed := hasher.Digest()
-	if computed != expected {
-		rw.WriteError(http.StatusBadRequest, oci.NewDistributionError(oci.ErrCodeDigestInvalid, "payload digest mismatch", nil))
-		return
-	}
-	label := map[string]string{labels.LabelDistributionSource + "." + dist.Registry: dist.Name}
-	if err := w.Commit(ctx, n, expected, content.WithLabels(label)); err != nil {
+	if err = w.Commit(ctx, n, dist.Digest, withSource(dist)); err != nil && !errdefs.IsAlreadyExists(err) {
 		rw.WriteError(http.StatusInternalServerError, err)
 		return
 	}
 
-	rw.Header().Set(oci.HeaderDockerDigest, expected.String())
-	rw.Header().Set("Location", "/v2/"+dist.Name+"/blobs/"+expected.String())
-	rw.Header().Set(httpx.HeaderContentLength, "0")
-	rw.WriteHeader(http.StatusCreated)
+	created(rw, dist)
 }
 
 func (r *Registry) handleBlobUploadStart(rw httpx.ResponseWriter, req *http.Request, dist oci.DistributionPath, cs content.Store) {
-	id := uuid.NewString()
-	w, err := cs.Writer(req.Context(), content.WithRef("spegel-upload:"+id))
+	dist.Session = uuid.NewString()
+	w, err := cs.Writer(req.Context(), content.WithRef(uploadRef(dist.Session)))
 	if err != nil {
 		rw.WriteError(http.StatusInternalServerError, err)
 		return
 	}
 	_ = w.Close()
-	rw.Header().Set("Location", "/v2/"+dist.Name+"/blobs/uploads/"+id)
-	rw.Header().Set("Docker-Upload-UUID", id)
-	rw.Header().Set("Range", "0-")
-	rw.Header().Set(httpx.HeaderContentLength, "0")
+	uploadStatus(rw, dist, 0)
 	rw.WriteHeader(http.StatusAccepted)
 }
 
@@ -184,7 +192,7 @@ func (r *Registry) handleBlobUploadChunk(rw httpx.ResponseWriter, req *http.Requ
 		return
 	}
 
-	w, err := cs.Writer(ctx, content.WithRef("spegel-upload:"+dist.Session))
+	w, err := cs.Writer(ctx, content.WithRef(uploadRef(dist.Session)))
 	if err != nil {
 		rw.WriteError(http.StatusNotFound, oci.NewDistributionError(oci.ErrCodeBlobUploadUnknown, "unknown upload session", nil))
 		return
@@ -200,10 +208,7 @@ func (r *Registry) handleBlobUploadChunk(rw httpx.ResponseWriter, req *http.Requ
 		return
 	}
 
-	rw.Header().Set("Location", "/v2/"+dist.Name+"/blobs/uploads/"+dist.Session)
-	rw.Header().Set("Range", "0-"+strconv.FormatInt(max(0, status.Offset-1), 10))
-	rw.Header().Set("Docker-Upload-UUID", dist.Session)
-	rw.Header().Set(httpx.HeaderContentLength, "0")
+	uploadStatus(rw, dist, status.Offset)
 	rw.WriteHeader(http.StatusAccepted)
 }
 
@@ -218,7 +223,7 @@ func (r *Registry) handleBlobUploadCommit(rw httpx.ResponseWriter, req *http.Req
 		return
 	}
 	desc := ocispec.Descriptor{Digest: dist.Digest}
-	w, err := cs.Writer(ctx, content.WithRef("spegel-upload:"+dist.Session), content.WithDescriptor(desc))
+	w, err := cs.Writer(ctx, content.WithRef(uploadRef(dist.Session)), content.WithDescriptor(desc))
 	if err != nil {
 		rw.WriteError(http.StatusNotFound, oci.NewDistributionError(oci.ErrCodeBlobUploadUnknown, "unknown upload session", nil))
 		return
@@ -236,16 +241,12 @@ func (r *Registry) handleBlobUploadCommit(rw httpx.ResponseWriter, req *http.Req
 		return
 	}
 
-	label := map[string]string{labels.LabelDistributionSource + "." + dist.Registry: dist.Name}
-	if err = w.Commit(ctx, status.Offset, dist.Digest, content.WithLabels(label)); err != nil && !errdefs.IsAlreadyExists(err) {
+	if err = w.Commit(ctx, status.Offset, dist.Digest, withSource(dist)); err != nil && !errdefs.IsAlreadyExists(err) {
 		rw.WriteError(http.StatusInternalServerError, err)
 		return
 	}
 
-	rw.Header().Set(oci.HeaderDockerDigest, dist.Digest.String())
-	rw.Header().Set("Location", "/v2/"+dist.Name+"/blobs/"+dist.Digest.String())
-	rw.Header().Set(httpx.HeaderContentLength, "0")
-	rw.WriteHeader(http.StatusCreated)
+	created(rw, dist)
 }
 
 func (r *Registry) handleBlobUploadGet(rw httpx.ResponseWriter, req *http.Request, dist oci.DistributionPath, cs content.Store) {
@@ -254,7 +255,7 @@ func (r *Registry) handleBlobUploadGet(rw httpx.ResponseWriter, req *http.Reques
 		rw.WriteError(http.StatusInternalServerError, err)
 		return
 	}
-	status, err := cs.Status(ctx, "spegel-upload:"+dist.Session)
+	status, err := cs.Status(ctx, uploadRef(dist.Session))
 	if err != nil && errdefs.IsNotFound(err) {
 		rw.WriteError(http.StatusNotFound, oci.NewDistributionError(oci.ErrCodeBlobUploadUnknown, "unknown upload session", nil))
 		return
@@ -263,10 +264,7 @@ func (r *Registry) handleBlobUploadGet(rw httpx.ResponseWriter, req *http.Reques
 		return
 	}
 
-	rw.Header().Set("Range", "0-"+strconv.FormatInt(max(0, status.Offset-1), 10))
-	rw.Header().Set("Location", "/v2/"+dist.Name+"/blobs/uploads/"+dist.Session)
-	rw.Header().Set("Docker-Upload-UUID", dist.Session)
-	rw.Header().Set(httpx.HeaderContentLength, "0")
+	uploadStatus(rw, dist, status.Offset)
 	rw.WriteHeader(http.StatusNoContent)
 }
 
@@ -284,9 +282,8 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 			return
 		}
 	}
-	dgst := digest.FromBytes(body)
 	size := int64(len(body))
-	desc := ocispec.Descriptor{MediaType: mediaType, Digest: dgst, Size: size}
+	desc := ocispec.Descriptor{MediaType: mediaType, Digest: digest.FromBytes(body), Size: size}
 
 	ctx, err := r.withLease(req.Context())
 	if err != nil {
@@ -306,8 +303,7 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 			rw.WriteError(http.StatusInternalServerError, err)
 			return
 		}
-		label := map[string]string{labels.LabelDistributionSource + "." + dist.Registry: dist.Name}
-		if err := w.Commit(ctx, size, dgst, content.WithLabels(label)); err != nil && !errdefs.IsAlreadyExists(err) {
+		if err = w.Commit(ctx, size, desc.Digest, withSource(dist)); err != nil && !errdefs.IsAlreadyExists(err) {
 			rw.WriteError(http.StatusInternalServerError, err)
 			return
 		}
@@ -315,17 +311,15 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 
 	ref := dist.Reference()
 	if dist.Digest != "" {
-		ref = fmt.Sprintf("%s/%s@%s", dist.Registry, dist.Name, dist.Digest)
+		ref = fmt.Sprintf("%s/%s@%s", dist.Registry, dist.Name, desc.Digest)
 	}
 	if _, err = client.ImageService().Create(ctx, (images.Image{Name: ref, Target: desc})); err != nil && !errdefs.IsAlreadyExists(err) {
 		rw.WriteError(http.StatusInternalServerError, err)
 		return
 	}
 
-	rw.Header().Set(oci.HeaderDockerDigest, dgst.String())
-	rw.Header().Set("Location", "/v2/"+dist.Name+"/manifests/"+dgst.String())
-	rw.Header().Set(httpx.HeaderContentLength, "0")
-	rw.WriteHeader(http.StatusCreated)
+	dist.Digest = desc.Digest
+	created(rw, dist)
 	pushHeaders := req.Header.Clone()
 	go func() {
 		log := r.log.WithName("backgroundPush").WithValues("ref", ref, "desc", desc)
@@ -338,7 +332,7 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 			return
 		}
 
-		if err := remotes.PushContent(ctx, pusher, desc, cs, nil, nil, nil); err != nil {
+		if err = remotes.PushContent(ctx, pusher, desc, cs, nil, nil, nil); err != nil {
 			log.Error(err, "failed to push image upstream")
 			return
 		}
