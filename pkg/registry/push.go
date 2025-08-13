@@ -338,11 +338,10 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 			return
 		}
 
-		if err := images.Dispatch(ctx, images.Handlers(
-			images.ChildrenHandler(cs),
-			remotes.PushHandler(pusher, cs),
-		), nil, desc); err != nil {
+		if err := remotes.PushContent(ctx, pusher, desc, cs, nil, nil, nil); err != nil {
 			log.Error(err, "failed to push image upstream")
+			return
 		}
+		log.Info("Finished upstream image push")
 	}()
 }
