@@ -14,6 +14,8 @@ import (
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/leases"
+	"github.com/containerd/containerd/v2/core/remotes"
+	"github.com/containerd/containerd/v2/core/remotes/docker"
 	"github.com/containerd/containerd/v2/pkg/labels"
 	"github.com/containerd/errdefs"
 	"github.com/google/uuid"
@@ -292,7 +294,8 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 		return
 	}
 
-	w, err := client.ContentStore().Writer(ctx, content.WithRef(dist.Reference()))
+	cs := client.ContentStore()
+	w, err := cs.Writer(ctx, content.WithRef(dist.Reference()))
 	if err != nil && !errdefs.IsAlreadyExists(err) {
 		rw.WriteError(http.StatusInternalServerError, err)
 		return
@@ -323,4 +326,23 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 	rw.Header().Set("Location", "/v2/"+dist.Name+"/manifests/"+dgst.String())
 	rw.Header().Set(httpx.HeaderContentLength, "0")
 	rw.WriteHeader(http.StatusCreated)
+	pushHeaders := req.Header.Clone()
+	go func() {
+		log := r.log.WithName("backgroundPush").WithValues("ref", ref, "desc", desc)
+		log.Info("Starting upstream image push")
+		ctx := context.Background()
+
+		pusher, err := docker.NewResolver(docker.ResolverOptions{Headers: pushHeaders}).Pusher(ctx, ref)
+		if err != nil {
+			log.Error(err, "failed to get pusher")
+			return
+		}
+
+		if err := images.Dispatch(ctx, images.Handlers(
+			images.ChildrenHandler(cs),
+			remotes.PushHandler(pusher, cs),
+		), nil, desc); err != nil {
+			log.Error(err, "failed to push image upstream")
+		}
+	}()
 }
